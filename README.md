@@ -1,6 +1,6 @@
 # lazycontainer
 
-![Lazy Container](./.gitub/images/lazy-container.png)
+![Lazy Container](./.github/images/lazy-container.png)
 
 
 ## Install
