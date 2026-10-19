@@ -1,5 +1,7 @@
 # lazycontainer
 
+![Lazy Container](./.gitub/inmage)
+
 A [lazydocker](https://github.com/jesseduffield/lazydocker)-style terminal UI for Apple's
 [`container`](https://github.com/apple/container) CLI on macOS.
 
@@ -27,21 +29,21 @@ Requires the `container` CLI on your PATH with its services running (`container 
 
 ## Keys
 
-| Key | Action |
-| --- | --- |
-| `↑`/`k` `↓`/`j` | move selection |
-| `tab` / `1`–`4` | switch panel (Containers, Images, Volumes, Networks) |
-| `[` / `]` | previous / next detail tab (Logs, Stats, Config) |
-| `enter` / `esc` | focus / leave the detail pane for scrolling |
-| `s` / `S` | stop / start container |
-| `r` | restart container |
-| `K` | kill container |
-| `e` | open a shell in the container (bash if present, else sh) |
-| `d` | delete container, image, volume or network (confirms first) |
-| `p` / `P` | prune stopped containers, dangling images (`P` = all unused), unused volumes or networks |
-| `R` | refresh now |
-| `?` | help |
-| `q` | quit |
+| Key             | Action                                                                                   |
+| --------------- | ---------------------------------------------------------------------------------------- |
+| `↑`/`k` `↓`/`j` | move selection                                                                           |
+| `tab` / `1`–`4` | switch panel (Containers, Images, Volumes, Networks)                                     |
+| `[` / `]`       | previous / next detail tab (Logs, Stats, Config)                                         |
+| `enter` / `esc` | focus / leave the detail pane for scrolling                                              |
+| `s` / `S`       | stop / start container                                                                   |
+| `r`             | restart container                                                                        |
+| `K`             | kill container                                                                           |
+| `e`             | open a shell in the container (bash if present, else sh)                                 |
+| `d`             | delete container, image, volume or network (confirms first)                              |
+| `p` / `P`       | prune stopped containers, dangling images (`P` = all unused), unused volumes or networks |
+| `R`             | refresh now                                                                              |
+| `?`             | help                                                                                     |
+| `q`             | quit                                                                                     |
 
 Lists refresh every two seconds. Logs follow live. Stats sample every two seconds while the Stats tab is open.
 
