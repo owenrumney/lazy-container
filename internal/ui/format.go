@@ -126,39 +126,60 @@ func formatRow(width int, cols []column, styled bool) string {
 	return pad(strings.Join(parts, " "), width)
 }
 
-func sparkline(values []float64, width int) string {
-	if width <= 0 {
-		return ""
+// chart draws values as block columns h rows tall, newest on the right.
+// peak is the top of the y axis; anything above it clips.
+func chart(values []float64, peak float64, w, h int, style lipgloss.Style) []string {
+	if w <= 0 || h <= 0 {
+		return nil
 	}
-	if len(values) > width {
-		values = values[len(values)-width:]
+	if len(values) > w {
+		values = values[len(values)-w:]
 	}
-	peak := 1.0
-	for _, v := range values {
-		peak = max(peak, v)
+	if peak <= 0 {
+		peak = 1
 	}
-	var b strings.Builder
-	for i := 0; i < width-len(values); i++ {
-		b.WriteRune(' ')
+	gap := strings.Repeat(" ", w-len(values))
+	rows := make([]string, h)
+	for r := range rows {
+		var b strings.Builder
+		b.WriteString(gap)
+		for _, v := range values {
+			eighths := int(max(0, min(v/peak, 1)) * float64(h*8))
+			if v > 0 && eighths == 0 {
+				eighths = 1 // keep a trickle visible
+			}
+			switch cell := eighths - (h-1-r)*8; {
+			case cell <= 0:
+				b.WriteRune(' ')
+			case cell >= 8:
+				b.WriteRune('█')
+			default:
+				b.WriteRune(sparkChars[cell-1])
+			}
+		}
+		rows[r] = style.Render(b.String())
 	}
-	for _, v := range values {
-		idx := int(v / peak * float64(len(sparkChars)-1))
-		b.WriteRune(sparkChars[max(0, min(idx, len(sparkChars)-1))])
-	}
-	return b.String()
+	return rows
 }
 
-func bar(fraction float64, width int) string {
-	fraction = max(0, min(fraction, 1))
-	filled := int(fraction*float64(width) + 0.5)
-	style := greenStyle
+func peakOf(values []float64) float64 {
+	p := 0.0
+	for _, v := range values {
+		p = max(p, v)
+	}
+	return p
+}
+
+// fracStyle colours a 0..1 utilisation: green, amber over 70%, red over 90%.
+func fracStyle(fraction float64) lipgloss.Style {
 	switch {
 	case fraction > 0.9:
-		style = redStyle
+		return redStyle
 	case fraction > 0.7:
-		style = yellowStyle
+		return yellowStyle
+	default:
+		return greenStyle
 	}
-	return style.Render(strings.Repeat("█", filled)) + dimStyle.Render(strings.Repeat("░", width-filled))
 }
 
 func stateStyle(state string) lipgloss.Style {

@@ -46,8 +46,8 @@ type Resources struct {
 }
 
 type NetworkAttach struct {
-	Network string            `json:"network"`
-	Options map[string]string `json:"options"`
+	Network string         `json:"network"`
+	Options map[string]any `json:"options"`
 }
 
 type Mount struct {

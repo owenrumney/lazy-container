@@ -18,18 +18,44 @@ func renderHints(hs []hint) string {
 	return strings.Join(parts, dimStyle.Render(" · "))
 }
 
+func wrapHint(on bool) string {
+	if on {
+		return "no wrap"
+	}
+	return "wrap"
+}
+
+func mouseHint(off bool) hint {
+	if off {
+		return hint{"v", "mouse on"}
+	}
+	return hint{"v", "select text"}
+}
+
 func (m Model) hints() []hint {
+	if m.shellFocused() {
+		return []hint{{shellDetachKey, "detach"}}
+	}
 	if m.detailFocused {
 		hs := []hint{{"j/k", "scroll"}, {"g/G", "top/bottom"}, {"esc", "back"}}
 		if m.focus == panelContainers {
 			hs = append(hs, hint{"[ ]", "tab"})
 		}
-		return append(hs, hint{"q", "quit"})
+		if m.logsVisible() {
+			hs = append(hs, hint{"w", wrapHint(m.logWrap)})
+		}
+		return append(hs, mouseHint(m.mouseOff), hint{"q", "quit"})
 	}
 	hs := []hint{{"↑↓", "move"}, {"tab", "panel"}, {"enter", "detail"}}
 	switch m.focus {
 	case panelContainers:
 		hs = append(hs, hint{"[ ]", "tab"})
+		if m.logsVisible() {
+			hs = append(hs, hint{"w", wrapHint(m.logWrap)})
+		}
+		if m.shellVisible() {
+			hs = append(hs, hint{"enter", "attach"})
+		}
 		if c, ok := m.selectedContainer(); ok {
 			if c.Running() {
 				hs = append(hs, hint{"s", "stop"}, hint{"r", "restart"}, hint{"K", "kill"}, hint{"e", "shell"})
@@ -44,7 +70,7 @@ func (m Model) hints() []hint {
 	case panelVolumes, panelNetworks:
 		hs = append(hs, hint{"d", "delete"}, hint{"p", "prune"})
 	}
-	return append(hs, hint{"?", "help"}, hint{"q", "quit"})
+	return append(hs, mouseHint(m.mouseOff), hint{"?", "help"}, hint{"q", "quit"})
 }
 
 func helpView() string {
@@ -70,8 +96,13 @@ func helpView() string {
 			[2]string{"r", "restart"},
 			[2]string{"K", "kill"},
 			[2]string{"d", "delete (force if running)"},
-			[2]string{"e", "open a shell"},
+			[2]string{"e", "open a shell full screen"},
 			[2]string{"p", "prune stopped containers"},
+			[2]string{"w", "wrap long log lines (off by default)"},
+		),
+		section("Shell tab",
+			[2]string{"enter", "attach — every key then goes to the shell"},
+			[2]string{shellDetachKey, "detach and return to the UI"},
 		),
 		section("Images",
 			[2]string{"d", "delete"},
@@ -82,6 +113,8 @@ func helpView() string {
 			[2]string{"p", "prune unused"},
 		),
 		section("General",
+			[2]string{"click", "select a row, or a detail tab"},
+			[2]string{"v", "release the mouse so the terminal can select text"},
 			[2]string{"?", "toggle this help"},
 			[2]string{"q", "quit"},
 		),

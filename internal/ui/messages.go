@@ -53,6 +53,11 @@ type logLinesMsg struct {
 	done  bool
 }
 
+type shellOutputMsg struct {
+	seq  int
+	done bool
+}
+
 type actionDoneMsg struct {
 	verb string
 	err  error

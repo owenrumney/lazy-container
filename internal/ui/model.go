@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/owenrumney/container-tui/internal/container"
 )
@@ -31,6 +32,7 @@ const (
 	tabLogs detailTab = iota
 	tabStats
 	tabConfig
+	tabShell
 	tabCount
 )
 
@@ -71,7 +73,7 @@ type Model struct {
 	refreshing bool
 
 	stats         map[string]statSample
-	cpuHistory    map[string][]float64
+	history       map[string]statHistory
 	statsInFlight bool
 	statsErr      error
 
@@ -84,7 +86,14 @@ type Model struct {
 	logLines    <-chan string
 	logCancel   context.CancelFunc
 	logSeq      int
+	logWrap     bool
+	mouseOff    bool
 	detailSeq   int
+
+	shell    *shellSession
+	shellFor string
+	shellSeq int
+	shellErr error
 
 	confirm   *confirmAction
 	help      bool
@@ -94,14 +103,14 @@ type Model struct {
 	flashID   int
 }
 
-var tabNames = [tabCount]string{"Logs", "Stats", "Config"}
+var tabNames = [tabCount]string{"Logs", "Stats", "Config", "Shell"}
 
 // New builds the initial model. The first snapshot is requested from Init.
 func New(client *container.Client) Model {
 	m := Model{
 		client:     client,
 		stats:      map[string]statSample{},
-		cpuHistory: map[string][]float64{},
+		history:    map[string]statHistory{},
 		viewport:   viewport.New(0, 0),
 		refreshing: true,
 	}
@@ -126,6 +135,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case tea.MouseMsg:
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			if t, ok := m.tabAt(msg.X, msg.Y); ok {
+				return m, m.selectTab(t)
+			}
+			if p, row, ok := m.panelAt(msg.X, msg.Y); ok {
+				return m, m.clickPanel(p, row)
+			}
+		}
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		return m, cmd
@@ -183,6 +200,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, waitLogs(m.logLines, msg.seq)
+	case shellOutputMsg:
+		if msg.seq != m.shellSeq || m.shell == nil {
+			return m, nil
+		}
+		if m.shellVisible() {
+			m.renderDetail()
+		}
+		if msg.done {
+			return m, nil
+		}
+		return m, waitShell(m.shell, msg.seq)
 	case selectionSettledMsg:
 		if msg.seq != m.detailSeq {
 			return m, nil
@@ -251,6 +279,9 @@ func (m *Model) resize() {
 	l := m.layout()
 	m.viewport.Width = max(l.right-2, 0)
 	m.viewport.Height = max(l.main-2, 0)
+	if m.shell != nil {
+		m.shell.resize(m.shellSize())
+	}
 	m.rebuildRows()
 	m.ensureVisible()
 	m.renderDetail()
@@ -310,19 +341,23 @@ func (m *Model) applyStats(msg statsMsg) {
 		seen[s.ID] = true
 		sample := statSample{stats: s, at: msg.at}
 		if prev, ok := m.stats[s.ID]; ok {
-			sample = statSample{stats: s, at: msg.at, cpuPct: cpuPercent(prev.stats, s, msg.at.Sub(prev.at)), hasCPU: true}
-			hist := append(m.cpuHistory[s.ID], sample.cpuPct)
-			if len(hist) > maxHistory {
-				hist = hist[len(hist)-maxHistory:]
+			elapsed := msg.at.Sub(prev.at)
+			sample = statSample{
+				stats:    s,
+				at:       msg.at,
+				cpuPct:   cpuPercent(prev.stats, s, elapsed),
+				netRate:  byteRate(prev.stats.NetworkRxBytes+prev.stats.NetworkTxBytes, s.NetworkRxBytes+s.NetworkTxBytes, elapsed),
+				diskRate: byteRate(prev.stats.BlockReadBytes+prev.stats.BlockWriteBytes, s.BlockReadBytes+s.BlockWriteBytes, elapsed),
+				hasCPU:   true,
 			}
-			m.cpuHistory[s.ID] = hist
+			m.history[s.ID] = m.history[s.ID].push(sample.cpuPct, memPercent(s), sample.netRate, sample.diskRate)
 		}
 		m.stats[s.ID] = sample
 	}
 	for id := range m.stats {
 		if !seen[id] {
 			delete(m.stats, id)
-			delete(m.cpuHistory, id)
+			delete(m.history, id)
 		}
 	}
 }
@@ -399,6 +434,9 @@ func (m *Model) loadDetail() tea.Cmd {
 	if !m.logsVisible() {
 		m.stopLogs()
 	}
+	if m.shellFor != "" && m.shellFor != m.panels[panelContainers].selectedID() {
+		m.stopShell()
+	}
 	client := m.client
 	id := m.panels[m.focus].selectedID()
 	switch {
@@ -414,6 +452,10 @@ func (m *Model) loadDetail() tea.Cmd {
 			cmd = m.fetchStats()
 		case tabConfig:
 			cmd = m.loadConfig("container:"+id, func(ctx context.Context) (string, error) { return client.InspectContainer(ctx, id) })
+		case tabShell:
+			if m.shell == nil && m.shellErr == nil {
+				cmd = m.startShell(c)
+			}
 		}
 	case m.focus == panelImages:
 		cmd = m.loadConfig("image:"+id, func(ctx context.Context) (string, error) { return client.InspectImage(ctx, id) })
@@ -456,6 +498,56 @@ func (m *Model) stopLogs() {
 	m.logLines = nil
 }
 
+// shellSize leaves the bottom pane row for renderShell's status line.
+func (m Model) shellSize() (int, int) {
+	return max(m.viewport.Width, 1), max(m.viewport.Height-1, 1)
+}
+
+func (m Model) shellVisible() bool {
+	return m.focus == panelContainers && m.tab == tabShell
+}
+
+// shellFocused reports whether key presses belong to the shell rather than the UI.
+func (m Model) shellFocused() bool {
+	if !m.detailFocused || !m.shellVisible() || m.shell == nil {
+		return false
+	}
+	done, _ := m.shell.status()
+	return !done
+}
+
+func (m *Model) startShell(c container.Container) tea.Cmd {
+	m.stopShell()
+	if m.client == nil || !c.Running() {
+		return nil
+	}
+	w, h := m.shellSize()
+	s, err := newShellSession(m.client.ExecCommand(c.ID, "/bin/sh", "-c", shellProbe), w, h)
+	if err != nil {
+		m.shellErr = err
+		return nil
+	}
+	m.shellSeq++
+	m.shell = s
+	m.shellFor = c.ID
+	return waitShell(s, m.shellSeq)
+}
+
+func (m *Model) stopShell() {
+	if m.shell != nil {
+		m.shell.close()
+		m.shell = nil
+	}
+	m.shellFor = ""
+	m.shellErr = nil
+	m.shellSeq++
+}
+
+func (m *Model) shutdown() {
+	m.stopLogs()
+	m.stopShell()
+}
+
 // renderDetail pushes the current selection's content into the viewport.
 func (m *Model) renderDetail() {
 	width := m.viewport.Width
@@ -465,14 +557,17 @@ func (m *Model) renderDetail() {
 		case m.focus != panelContainers || m.tab == tabConfig:
 			content = renderConfig(m.config, width)
 		case m.tab == tabLogs:
-			content = renderLogs(m.logs, width)
+			content = renderLogs(m.logs, width, m.logWrap)
+		case m.tab == tabShell:
+			c, _ := m.selectedContainer()
+			content = renderShell(m.shell, m.shellErr, c, width, m.viewport.Height)
 		case m.tab == tabStats:
 			c, _ := m.selectedContainer()
 			var sample *statSample
 			if s, ok := m.stats[c.ID]; ok {
 				sample = &s
 			}
-			content = renderStats(c, sample, m.cpuHistory[c.ID], width, time.Now())
+			content = renderStats(c, sample, m.history[c.ID], width, m.viewport.Height, time.Now())
 			if m.statsErr != nil {
 				content += "\n\n" + errStyle.Render(m.statsErr.Error())
 			}
@@ -495,9 +590,12 @@ func (m *Model) renderDetail() {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.shellFocused() {
+		return m.handleShellKey(msg)
+	}
 	key := msg.String()
 	if key == "ctrl+c" {
-		m.stopLogs()
+		m.shutdown()
 		return m, tea.Quit
 	}
 	if m.confirm != nil {
@@ -518,7 +616,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch key {
 	case "q":
-		m.stopLogs()
+		m.shutdown()
 		return m, tea.Quit
 	case "?":
 		m.help = true
@@ -544,25 +642,67 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "pgup", "ctrl+u":
 		return m, m.moveCursor(-m.pageSize())
 	case "enter":
-		if m.panels[m.focus].selectedID() != "" {
-			m.detailFocused = true
+		if m.panels[m.focus].selectedID() == "" {
+			return m, nil
 		}
-		return m, nil
+		m.detailFocused = true
+		return m, m.restartShellIfDone()
 	case "[":
 		return m, m.switchTab(-1)
 	case "]":
 		return m, m.switchTab(1)
+	case "w":
+		return m.toggleLogWrap()
+	case "v":
+		return m.toggleMouse()
 	}
 	return m.handleAction(key)
 }
 
+// handleShellKey forwards every press to the PTY, so the shell owns ctrl+c and q.
+func (m Model) handleShellKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == shellDetachKey {
+		m.detailFocused = false
+		return m, nil
+	}
+	m.shell.write(keyBytes(msg))
+	return m, nil
+}
+
+// restartShellIfDone relaunches an exited shell so enter brings it back.
+func (m *Model) restartShellIfDone() tea.Cmd {
+	if !m.shellVisible() {
+		return nil
+	}
+	done := true
+	if m.shell != nil {
+		done, _ = m.shell.status()
+	}
+	if !done {
+		return nil
+	}
+	c, ok := m.selectedContainer()
+	if !ok {
+		return nil
+	}
+	cmd := m.startShell(c)
+	m.renderDetail()
+	return cmd
+}
+
 func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "tab", "enter", "shift+tab":
+	case "enter":
+		if cmd := m.restartShellIfDone(); cmd != nil {
+			return m, cmd
+		}
+		m.detailFocused = false
+		return m, nil
+	case "esc", "tab", "shift+tab":
 		m.detailFocused = false
 		return m, nil
 	case "q":
-		m.stopLogs()
+		m.shutdown()
 		return m, tea.Quit
 	case "[":
 		return m, m.switchTab(-1)
@@ -574,10 +714,33 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "G":
 		m.viewport.GotoBottom()
 		return m, nil
+	case "w":
+		return m.toggleLogWrap()
+	case "v":
+		return m.toggleMouse()
 	}
 	var cmd tea.Cmd
 	m.viewport, cmd = m.viewport.Update(msg)
 	return m, cmd
+}
+
+// toggleMouse releases the mouse so the terminal can select text, since mouse
+// reporting takes precedence over the terminal's own selection.
+func (m Model) toggleMouse() (tea.Model, tea.Cmd) {
+	m.mouseOff = !m.mouseOff
+	if m.mouseOff {
+		return m, tea.Batch(tea.DisableMouse, m.flash("mouse released — select text as usual, v to re-enable", false))
+	}
+	return m, tea.Batch(tea.EnableMouseCellMotion, m.flash("mouse enabled", false))
+}
+
+func (m Model) toggleLogWrap() (tea.Model, tea.Cmd) {
+	if !m.logsVisible() {
+		return m, nil
+	}
+	m.logWrap = !m.logWrap
+	m.renderDetail()
+	return m, nil
 }
 
 func (m Model) pageSize() int {
@@ -609,8 +772,79 @@ func (m *Model) switchTab(n int) tea.Cmd {
 	if m.focus != panelContainers {
 		return nil
 	}
-	m.tab = (m.tab + detailTab(n) + tabCount) % tabCount
+	return m.selectTab((m.tab + detailTab(n) + tabCount) % tabCount)
+}
+
+func (m *Model) selectTab(t detailTab) tea.Cmd {
+	if m.tab == t {
+		return nil
+	}
+	m.tab = t
 	return m.loadDetail()
+}
+
+// panelAt maps a click in the left column to a panel, and to the row under the
+// pointer. A row of -1 means the click landed on the panel's border or title.
+func (m Model) panelAt(x, y int) (panelID, int, bool) {
+	l := m.layout()
+	if x < 0 || x >= l.left || y < l.status {
+		return 0, -1, false
+	}
+	top := l.status
+	for i := range panelCount {
+		h := l.panels[i]
+		if y >= top+h {
+			top += h
+			continue
+		}
+		p := m.panels[i]
+		visible := h - 2
+		j := y - top - 1 // the title row sits above the first body row
+		if j < 0 || j >= visible || !m.loaded {
+			return panelID(i), -1, true
+		}
+		idx := visibleOffset(p.offset, p.cursor, len(p.rows), visible) + j
+		if idx >= len(p.rows) {
+			return panelID(i), -1, true
+		}
+		return panelID(i), idx, true
+	}
+	return 0, -1, false
+}
+
+// clickPanel focuses the panel and moves its cursor to the clicked row.
+func (m *Model) clickPanel(p panelID, row int) tea.Cmd {
+	cmds := []tea.Cmd{m.setFocus(p)}
+	if row >= 0 && row != m.panels[p].cursor {
+		m.panels[p].cursor = row
+		m.panels[p].ensureVisible(m.layout().panels[p] - 2)
+		cmds = append(cmds, m.selectionChanged())
+	}
+	return tea.Batch(cmds...)
+}
+
+// tabAt maps a click to a tab heading in the detail pane's title row, using the
+// same offsets box() and detailTitle() lay the title out with.
+func (m Model) tabAt(x, y int) (detailTab, bool) {
+	name := m.panels[panelContainers].selectedID()
+	if y != 0 || m.focus != panelContainers || name == "" {
+		return 0, false
+	}
+	l := m.layout()
+	origin := l.left + 3       // box corner, border, then the label's leading space
+	limit := max(l.right-5, 0) // box() truncates the title to this
+	off := ansi.StringWidth(name) + 3
+	for i, t := range tabNames {
+		w := ansi.StringWidth(t)
+		if off+w > limit {
+			return 0, false
+		}
+		if x >= origin+off && x < origin+off+w {
+			return detailTab(i), true
+		}
+		off += w + 3 // the " │ " separator
+	}
+	return 0, false
 }
 
 func (m Model) handleAction(key string) (tea.Model, tea.Cmd) {
