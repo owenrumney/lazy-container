@@ -1,23 +1,7 @@
 # lazycontainer
 
-![Lazy Container](./.gitub/inmage)
+![Lazy Container](./.gitub/images/lazy-container.png)
 
-A [lazydocker](https://github.com/jesseduffield/lazydocker)-style terminal UI for Apple's
-[`container`](https://github.com/apple/container) CLI on macOS.
-
-```
-╭─ Status ──────────────────────╮╭─ web · Logs │ Stats │ Config ───────────────────────╮
-│● running  container 1.3.1     ││2026-10-19T12:00:01Z GET / 200 3ms                    │
-│images 21.6 GB · 20.1 GB recl… ││2026-10-19T12:00:02Z GET /health 200 1ms              │
-│containers 8.1 GB · volumes 0 B││…                                                     │
-╰───────────────────────────────╯│                                                      │
-╭─ Containers (2) ──────────────╮│                                                      │
-│● web      running nginx:latest││                                                      │
-│● worker   stopped alpine      ││                                                      │
-╰───────────────────────────────╯│                                                      │
-╭─ Images (6) ──────────────────╮│                                                      │
-…
-```
 
 ## Install
 
